@@ -4,166 +4,98 @@
 ssm/documents/console/public-sharing-permission を Disable（パブリック共有ブロック） に自動設定する仕組みです。
 
 # 構成図
-<img width="1223" height="627" alt="image" src="https://github.com/user-attachments/assets/663953e5-43f6-4a80-87d1-5500f75f0d1d" />
+<img width="1179" height="643" alt="image" src="https://github.com/user-attachments/assets/abd9b5a9-4c78-4222-a8f5-7cb24898fc80" />
 
-# Lambda
-EnableSSMDocPublicBlock
+# 処理フロー
+1.新規アカウント作成 → ルール起動
 
+・管理アカウントの EventBridge ルールがCreateAccountResultを検知
+
+・ルールが スケジュール作成用 Lambda を起動
+
+2.スケジュール作成用 Lambda
+
+・EventBridge Scheduler に daily-ssm-docblock-<accountId> を作成（rate(1 day)
+
+・ターゲットは 本処理 Lambda
+
+3.本処理 Lambda（毎日実行）
+
+・子アカウントを AssumeRole
+
+・子アカに AWSServiceRoleForAmazonSSM（SSM の SLR）があるか IAM:GetRole で確認
+
+・まだ無ければ：skipped:not_ready で終了（スケジュールは残る → 翌日再実行）
+
+・対象リージョンで/ssm/documents/console/public-sharing-permission = Disable に更新（既に Disable なら noop、更新したら updated）
+
+4.完了判定 & スケジュール削除
+
+・全リージョンが updated または noop になったら成功
+
+・受け取った scheduleName で Scheduler のスケジュールを削除
+
+# スケジュール作成用Lambda：create-schedule-lambda
 ```
-import json
-import os
-import time
-import boto3
-from botocore.exceptions import ClientError, EndpointConnectionError, NoCredentialsError
+import os, json, boto3, datetime
+SCHEDULER_REGION = "us-east-1"
 
-# ========= 環境変数 =========
-TARGET_ROLE_NAME = os.environ.get("TARGET_ROLE_NAME", "OrganizationAccountAccessRole")
+# 本処理 Lambda の ARN
+TARGET_LAMBDA_ARN = "arn:aws:lambda:us-east-1:AccountID:function:EnableSSMDocPublicBlock"
 
-# 対象リージョン（カンマ区切り or "ALL"）
-_TARGET_REGIONS_RAW = os.environ.get(
-    "TARGET_REGIONS",
-    "ap-northeast-1,ap-northeast-2,ap-northeast-3,us-east-1,us-east-2,us-west-1,us-west-2"
-).strip()
+# ここは IAM ロールの ARN（scheduler.amazonaws.com を信頼、lambda:InvokeFunction を許可）
+SCHEDULE_ROLE_ARN = "arn:aws:iam::AccountID:role/schedule-creator-role"
 
-# AssumeRoleリトライ
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "10"))
-BASE_WAIT_SECONDS = int(os.environ.get("BASE_WAIT_SECONDS", "5"))
+DELAY_MIN = 1  # 初回だけ少し遅らせたい場合
 
-# ========= 定数 =========
-SERVICE_SETTING_KEY = "ssm/documents/console/public-sharing-permission"  # Disable にする
-UPDATE_VALUE = "Disable"  # パブリック共有をブロック（=Disable）
+scheduler = boto3.client("scheduler", region_name=SCHEDULER_REGION)
 
-def _log(msg: str, **kw):
-    print(json.dumps({"message": msg, **kw}, ensure_ascii=False))
-
-def get_target_regions() -> list[str]:
-    """
-    TARGET_REGIONS=ALL なら、商用リージョンの SSM 対応リージョンをすべて返す。
-    """
-    if _TARGET_REGIONS_RAW.upper() != "ALL":
-        return [r.strip() for r in _TARGET_REGIONS_RAW.split(",") if r.strip()]
-    session = boto3.session.Session()
-    return sorted(session.get_available_regions("ssm"))  # 商用リージョンのみ（Gov/China除外）
-
-def parse_account_id_from_event(event: dict) -> str | None:
-    """
-    Organizations のイベントから子アカウントIDを抽出する。
-    - CreateAccountResult（Service Event）: detail.serviceEventDetails.createAccountStatus.accountId
-    - AcceptHandshake（API Call）: detail.requestParameters.target.id
-    - InviteAccountToOrganization（API Call）: 同上（target.id）
-    - CreateAccount（API Call）: detail.responseElements.createAccountStatus.accountId（早すぎて失敗しがちだが一応拾う）
-    """
-    detail = (event or {}).get("detail", {}) or {}
-    a1 = detail.get("serviceEventDetails", {}).get("createAccountStatus", {}).get("accountId")
-    if a1:
-        return a1
-    a2 = detail.get("requestParameters", {}).get("target", {}).get("id")
-    if a2:
-        return a2
-    a3 = detail.get("responseElements", {}).get("createAccountStatus", {}).get("accountId")
-    if a3:
-        return a3
-    return None
-
-def assume_role_with_retry(account_id: str, role_name: str, session_name: str = "enable-ssm-publicblock"):
-    """
-    子アカウントのロールにAssumeRoleする。
-    """
-    sts = boto3.client("sts")
-    role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-    for i in range(MAX_RETRIES):
-        try:
-            resp = sts.assume_role(RoleArn=role_arn, RoleSessionName=session_name)
-            return resp["Credentials"]
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code")
-            _log("assume_role failed; will retry", attempt=i, code=code, roleArn=role_arn)
-        except (EndpointConnectionError, NoCredentialsError) as e:
-            _log("assume_role connection/credential error; will retry", attempt=i, error=str(e))
-        if i == MAX_RETRIES - 1:
-            raise
-        time.sleep(BASE_WAIT_SECONDS * (2 ** i))
-
-def build_setting_arn(region: str, account_id: str) -> str:
-    return f"arn:aws:ssm:{region}:{account_id}:servicesetting/{SERVICE_SETTING_KEY}"
-
-def ensure_public_sharing_disabled(creds: dict, region: str, account_id: str) -> str:
-    """
-    SSM ServiceSetting（public-sharing-permission）を Disable にする（すでに Disable なら何もしない）
-    """
-    ssm = boto3.client(
-        "ssm",
-        region_name=region,
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-    )
-    setting_arn = build_setting_arn(region, account_id)
-
-    # 現在値の取得
-    current_value = None
-    try:
-        res = ssm.get_service_setting(SettingId=setting_arn)
-        current_value = res.get("ServiceSetting", {}).get("SettingValue")
-    except ClientError as e:
-        # ServiceSettingNotFoundExceptionなら未作成（= current_value=None）
-        if e.response.get("Error", {}).get("Code") != "ServiceSettingNotFoundException":
-            raise
-
-    if current_value == UPDATE_VALUE:
-        return f"{region}: already {UPDATE_VALUE}"
-
-    # 常に実更新
-    ssm.update_service_setting(SettingId=setting_arn, SettingValue=UPDATE_VALUE)
-    return f"{region}: set {UPDATE_VALUE}"
+def _acct(event):
+    d = event.get("detail", {}).get("serviceEventDetails", {}).get("createAccountStatus", {})
+    return d.get("accountId") or event.get("account")
 
 def lambda_handler(event, context):
-    _log("event received", event=event)
+    acct = _acct(event)
+    if not acct:
+        raise RuntimeError(f"accountId not found: {json.dumps(event)}")
 
-    account_id = parse_account_id_from_event(event)
-    if not account_id:
-        _log("account_id not found; skip", event=event)
-        return {"status": "skip", "reason": "account_id not found"}
+    name = f"daily-ssm-docblock-{acct}"
+    start = (datetime.datetime.now(datetime.timezone.utc)
+             + datetime.timedelta(minutes=DELAY_MIN)).replace(microsecond=0)
+    payload = json.dumps({"account": acct, "scheduleName": name})
 
-    # 残り実行時間チェック（ms 単位）
-    def remaining_seconds():
-        try:
-            return context.get_remaining_time_in_millis() / 1000.0
-        except Exception:
-            return 900.0  # 取れないときは最大想定
+    try:
+        scheduler.create_schedule(
+            Name=name,
+            GroupName="default",
+            ScheduleExpression="rate(1 day)",
+            StartDate=start,
+            FlexibleTimeWindow={"Mode": "OFF"},
+            Target={
+                "Arn": TARGET_LAMBDA_ARN,
+                "RoleArn": SCHEDULE_ROLE_ARN,
+                "Input": payload
+            }
+        )
+        action = "created"
+    except scheduler.exceptions.ConflictException:
+        scheduler.update_schedule(
+            Name=name,
+            GroupName="default",
+            ScheduleExpression="rate(1 day)",
+            FlexibleTimeWindow={"Mode": "OFF"},
+            Target={
+                "Arn": TARGET_LAMBDA_ARN,
+                "RoleArn": SCHEDULE_ROLE_ARN,
+                "Input": payload
+            }
+        )
+        action = "updated"
 
-    regions = get_target_regions()
-    _log("target regions resolved", regions=regions)
-
-    # 子アカウントに AssumeRole（伝播に備えてリトライ）
-    creds = assume_role_with_retry(account_id, TARGET_ROLE_NAME)
-
-    results = []
-    for region in regions:
-        if remaining_seconds() < 10:
-            results.append(f"{region}: skipped due to low remaining time")
-            break
-        try:
-            results.append(ensure_public_sharing_disabled(creds, region, account_id))
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code")
-            results.append(f"{region}: ERROR {code}")
-            _log("update_service_setting error", region=region, code=code, error=str(e))
-        except Exception as e:
-            results.append(f"{region}: ERROR {str(e)}")
-            _log("update_service_setting unexpected error", region=region, error=str(e))
-
-    _log("finished", accountId=account_id, results=results)
-    return {"status": "ok", "account": account_id, "results": results}
+    return {"status": action, "account": acct, "schedule": name, "first_run": start.isoformat()}
 
 ```
-メモリ：256MB
-
-エフェメラルストレージ：512MB
-
-タイムアウト：1分
-## IAMロール
-Lambda-EnableSSMDocPublicBlock-Role
+## IAMロール：lambda-schedule-creator-role 
 ### 信頼ポリシー
 ```
 {
@@ -171,20 +103,208 @@ Lambda-EnableSSMDocPublicBlock-Role
     "Statement": [
         {
             "Effect": "Allow",
-            "Action": [
-                "sts:AssumeRole"
-            ],
             "Principal": {
-                "Service": [
-                    "lambda.amazonaws.com"
-                ]
-            }
+                "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
         }
     ]
 }
 ```
-### インナーポリシー
-Lambda-EnableSSMDocPublicBlock-Policy
+### インナーポリシー：Lambda-Create-Schedule-Policy
+
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ManageDailyDocblockSchedulesInDefaultGroup",
+            "Effect": "Allow",
+            "Action": [
+                "scheduler:CreateSchedule",
+                "scheduler:UpdateSchedule"
+            ],
+            "Resource": "arn:aws:scheduler:us-east-1:AccountID:schedule/default/daily-ssm-docblock-*"
+        },
+        {
+            "Sid": "PassSchedulerInvokeRole",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": "arn:aws:iam::AccountID:role/schedule-creator-role"
+        }
+    ]
+}
+```
+
+# 本処理用Lambda：EnableSSMDocPublicBlock
+```
+import os
+import json
+import time
+import random
+import boto3
+from botocore.exceptions import ClientError, EndpointConnectionError
+
+# ==== 設定 ====
+REGIONS = [r.strip() for r in os.getenv(
+    "REGIONS",
+    "ap-northeast-1,ap-northeast-2,ap-northeast-3,us-east-1,us-east-2,us-west-1,us-west-2"
+).split(",")]
+
+ROLE_CANDIDATES = [
+    os.getenv("TARGET_ROLE_NAME", "OrganizationAccountAccessRole"),
+    "OrganizationAccountAccessRole"
+]
+
+SETTING_ID = "/ssm/documents/console/public-sharing-permission"
+DESIRED_VALUE = "Disable"  # "Enable" or "Disable"
+SKIP_IF_SSM_NOT_READY = os.getenv("SKIP_IF_SSM_NOT_READY", "true").lower() == "true"
+SCHEDULER_REGION = os.getenv("SCHEDULER_REGION", "us-east-1")
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+
+sts = boto3.client("sts")
+scheduler = boto3.client("scheduler", region_name=SCHEDULER_REGION)
+
+def assume_role_with_fallback(acct_id: str):
+    last = None
+    for role in ROLE_CANDIDATES:
+        try:
+            resp = sts.assume_role(
+                RoleArn=f"arn:aws:iam::{acct_id}:role/{role}",
+                RoleSessionName="SetSSMDocPublicBlock"
+            )
+            return role, resp["Credentials"]
+        except ClientError as e:
+            last = e
+    raise last
+
+def iam_cli(creds):
+    return boto3.client(
+        "iam",
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+
+def ssm_cli(creds, region):
+    return boto3.client(
+        "ssm",
+        region_name=region,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+
+def is_ssm_ready(iam_client) -> bool:
+    try:
+        iam_client.get_role(RoleName="AWSServiceRoleForAmazonSSM")
+        return True
+    except iam_client.exceptions.NoSuchEntityException:
+        return False
+    except ClientError:
+        return False
+
+def ensure_disabled(ssm_client):
+    # すでに Disable なら何もしない
+    try:
+        cur = ssm_client.get_service_setting(SettingId=SETTING_ID)
+        if cur.get("ServiceSetting", {}).get("SettingValue") == DESIRED_VALUE:
+            return "noop"
+    except ssm_client.exceptions.ServiceSettingNotFound:
+        pass
+
+    if DRY_RUN:
+        return "would_update"
+
+    ssm_client.update_service_setting(SettingId=SETTING_ID, SettingValue=DESIRED_VALUE)
+    # 反映確認（最大 ~30秒）
+    for _ in range(6):
+        time.sleep(5)
+        new = ssm_client.get_service_setting(SettingId=SETTING_ID)
+        if new.get("ServiceSetting", {}).get("SettingValue") == DESIRED_VALUE:
+            return "updated"
+    return "updated_but_unconfirmed"
+
+def handle_one_account(acct_id: str):
+    role_used, creds = assume_role_with_fallback(acct_id)
+    iam = iam_cli(creds)
+
+    if SKIP_IF_SSM_NOT_READY and not is_ssm_ready(iam):
+        return {"assumed_role": role_used, "slr": "missing", "results": "skipped:not_ready"}
+
+    results = {}
+    for region in REGIONS:
+        try:
+            cli = ssm_cli(creds, region)
+            results[region] = ensure_disabled(cli)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("ThrottlingException", "TooManyRequestsException"):
+                time.sleep(1 + random.random())
+                try:
+                    results[region] = ensure_disabled(cli)
+                    continue
+                except Exception as e2:
+                    results[region] = f"error:{type(e2).__name__}"
+                    continue
+            msg = e.response.get("Error", {}).get("Message", "")
+            results[region] = f"error:{code}:{msg}"
+        except EndpointConnectionError:
+            results[region] = "skipped:EndpointConnectionError"
+        except Exception as e:
+            results[region] = f"error:{type(e).__name__}"
+
+    return {"assumed_role": role_used, "slr": "ok", "results": results}
+
+def is_success(account_result: dict) -> bool:
+    if account_result.get("slr") == "missing":
+        return False
+    results = account_result.get("results", {})
+    return all((v == "noop") or str(v).startswith("updated") for v in results.values())
+
+def lambda_handler(event, context):
+    # account を抽出（CreateAccountResult にも対応）
+    acct = (
+        event.get("account")
+        or event.get("detail", {}).get("recipientAccountId")
+        or event.get("detail", {}).get("userIdentity", {}).get("accountId")
+        or event.get("detail", {}).get("serviceEventDetails", {}).get("createAccountStatus", {}).get("accountId")
+    )
+    if not acct:
+        raise RuntimeError(f"account not found in event: {json.dumps(event)}")
+
+    result = handle_one_account(acct)
+
+    # 成功したら自分のスケジュールを削除
+    schedule_name = event.get("scheduleName")
+    if schedule_name and is_success(result):
+        try:
+            scheduler.delete_schedule(Name=schedule_name, GroupName="default")
+            result["schedule_deleted"] = schedule_name
+        except Exception as e:
+            result["schedule_delete_error"] = str(e)
+
+    print(json.dumps({"target_account": acct, **result}, ensure_ascii=False))
+    return {"status": "ok", "target_account": acct, **result}
+
+```
+## IAMロール：Lambda-EnableSSMDocPublicBlock-Role 
+### 信頼ポリシー
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+```
+### インナーポリシー：Lambda-EnableSSMDocPublicBlock-Policy
 
 ```
 {
@@ -194,12 +314,10 @@ Lambda-EnableSSMDocPublicBlock-Policy
             "Sid": "AssumeIntoOrgChildAccounts",
             "Effect": "Allow",
             "Action": "sts:AssumeRole",
-            "Resource": [
-                "arn:aws:iam::*:role/OrganizationAccountAccessRole"
-            ],
+            "Resource": "arn:aws:iam::*:role/OrganizationAccountAccessRole",
             "Condition": {
                 "StringEquals": {
-                    "aws:ResourceOrgID": "o-xxxxxxxxx"
+                    "aws:ResourceOrgID": "o-xxxxxxxxxx"
                 }
             }
         },
@@ -224,24 +342,41 @@ Lambda-EnableSSMDocPublicBlock-Policy
                 "organizations:ListAccountsForParent"
             ],
             "Resource": "*"
+        },
+        {
+            "Sid": "DeleteOwnDailySchedules",
+            "Effect": "Allow",
+            "Action": "scheduler:DeleteSchedule",
+            "Resource": "arn:aws:scheduler:us-east-1:AccountIF:schedule/default/daily-ssm-docblock-*"
         }
     ]
 }
 ```
 
-# EventBridge
-Enable-SSM-Document-PublicBlock
+メモリ：256MB
 
+エフェメラルストレージ：512MB
+
+タイムアウト：1分
+
+
+# EventBridge：CreateSchedule
 ```
 {
+  "detail-type": ["AWS Service Event via CloudTrail"],
   "source": ["aws.organizations"],
-  "detail-type": ["AWS API Call via CloudTrail"],
   "detail": {
     "eventSource": ["organizations.amazonaws.com"],
-    "eventName": ["CreateAccount", "InviteAccountToOrganization"]
+    "serviceEventDetails": {
+      "createAccountStatus": {
+        "state": ["SUCCEEDED"]
+      }
+    },
+    "eventName": ["CreateAccountResult"]
   }
 }
 ```
+## Target：スケジュール作成用Lambda（create-schedule-lambda ）
 
 
 
