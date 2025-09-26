@@ -1,0 +1,44 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AssumeIntoOrgChildAccounts",
+            "Effect": "Allow",
+            "Action": "sts:AssumeRole",
+            "Resource": "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "Condition": {
+                "StringEquals": {
+                    "aws:ResourceOrgID": "o-xxxxxxxxxx"
+                }
+            }
+        },
+        {
+            "Sid": "Logs",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "OptionalOrgsRead",
+            "Effect": "Allow",
+            "Action": [
+                "organizations:DescribeAccount",
+                "organizations:ListAccounts",
+                "organizations:ListParents",
+                "organizations:ListChildren",
+                "organizations:ListAccountsForParent"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "DeleteOwnDailySchedules",
+            "Effect": "Allow",
+            "Action": "scheduler:DeleteSchedule",
+            "Resource": "arn:aws:scheduler:us-east-1:AccountID:schedule/default/daily-ssm-docblock-*"
+        }
+    ]
+}

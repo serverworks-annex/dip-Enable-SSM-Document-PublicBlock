@@ -1,0 +1,20 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ManageDailyDocblockSchedulesInDefaultGroup",
+            "Effect": "Allow",
+            "Action": [
+                "scheduler:CreateSchedule",
+                "scheduler:UpdateSchedule"
+            ],
+            "Resource": "arn:aws:scheduler:us-east-1:AccountID:schedule/default/daily-ssm-docblock-*"
+        },
+        {
+            "Sid": "PassSchedulerInvokeRole",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": "arn:aws:iam::AccountID:role/schedule-creator-role"
+        }
+    ]
+}
