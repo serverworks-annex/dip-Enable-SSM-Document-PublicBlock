@@ -23,7 +23,7 @@ ssm/documents/console/public-sharing-permission を Disable（パブリック共
 
 ・子アカウントを AssumeRole
 
-・子アカに AWSServiceRoleForAmazonSSM（SSM の SLR）があるか IAM:GetRole で確認
+・子アカウントに AWSServiceRoleForAmazonSSM（SSM の SLR）があるか IAM:GetRole で確認
 
 ・まだ無ければ：skipped:not_ready で終了（スケジュールは残る → 翌日再実行）
 
