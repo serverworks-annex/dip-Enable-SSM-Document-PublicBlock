@@ -11,6 +11,13 @@
             "Resource": "arn:aws:scheduler:us-east-1:AccountID:schedule/default/daily-ssm-docblock-*"
         },
         {
+            "Action": [
+                "SNS:Publish"
+            ],
+            "Resource": "arn:aws:sns:ap-northeast-1:023770199456:ssm-enable-publicblock-topic",
+            "Effect": "Allow"
+        },
+        {
             "Sid": "PassSchedulerInvokeRole",
             "Effect": "Allow",
             "Action": "iam:PassRole",
