@@ -36,6 +36,8 @@ ssm/documents/console/public-sharing-permission を Disable（パブリック共
 ・受け取った scheduleName で Scheduler のスケジュールを削除
 
 # スケジュール作成用Lambda：create-schedule-lambda
+リージョン：us-east-1
+
 IAMロール：lambda-schedule-creator-role 
 
 信頼ポリシー：lambda.amazonaws.com
@@ -49,6 +51,8 @@ IAMロール：lambda-schedule-creator-role
 タイムアウト：1分
 
 # 本処理用Lambda：EnableSSMDocPublicBlock
+リージョン：us-east-1
+
 IAMロール：Lambda-EnableSSMDocPublicBlock-Role 
 
 信頼ポリシー：lambda.amazonaws.com
@@ -62,22 +66,9 @@ IAMロール：Lambda-EnableSSMDocPublicBlock-Role
 タイムアウト：1分
 
 # EventBridge：CreateSchedule
-```
-{
-  "detail-type": ["AWS Service Event via CloudTrail"],
-  "source": ["aws.organizations"],
-  "detail": {
-    "eventSource": ["organizations.amazonaws.com"],
-    "serviceEventDetails": {
-      "createAccountStatus": {
-        "state": ["SUCCEEDED"]
-      }
-    },
-    "eventName": ["CreateAccountResult"]
-  }
-}
-```
-## Target：スケジュール作成用Lambda（create-schedule-lambda ）
+リージョン：us-east-1
+
+Target：スケジュール作成用Lambda（create-schedule-lambda ）
 
 
 
