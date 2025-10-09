@@ -1,0 +1,13 @@
+{
+  "detail-type": ["AWS Service Event via CloudTrail"],
+  "source": ["aws.organizations"],
+  "detail": {
+    "eventSource": ["organizations.amazonaws.com"],
+    "serviceEventDetails": {
+      "createAccountStatus": {
+        "state": ["SUCCEEDED"]
+      }
+    },
+    "eventName": ["CreateAccountResult"]
+  }
+}
