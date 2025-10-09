@@ -36,6 +36,8 @@ ssm/documents/console/public-sharing-permission を Disable（パブリック共
 ・受け取った scheduleName で Scheduler のスケジュールを削除
 
 # スケジュール作成用Lambda：create-schedule-lambda
+作業アカウント：786074732576（管理アカウント）
+
 リージョン：us-east-1
 
 IAMロール：lambda-schedule-creator-role 
@@ -51,6 +53,8 @@ IAMロール：lambda-schedule-creator-role
 タイムアウト：1分
 
 # 本処理用Lambda：EnableSSMDocPublicBlock
+作業アカウント：786074732576（管理アカウント）
+
 リージョン：us-east-1
 
 IAMロール：Lambda-EnableSSMDocPublicBlock-Role 
@@ -66,9 +70,17 @@ IAMロール：Lambda-EnableSSMDocPublicBlock-Role
 タイムアウト：1分
 
 # EventBridge：CreateSchedule
+作業アカウント：786074732576（管理アカウント）
+
 リージョン：us-east-1
 
 Target：スケジュール作成用Lambda（create-schedule-lambda ）
+
+# SNS：ssm-enable-publicblock
+作業アカウント：073659750679（dip-com-security）
+
+サブスクリプション：https://global.sns-api.chatbot.amazonaws.com
+
 
 
 
