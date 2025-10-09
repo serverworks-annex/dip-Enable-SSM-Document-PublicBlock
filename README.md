@@ -79,6 +79,8 @@ Target：スケジュール作成用Lambda（create-schedule-lambda ）
 # SNS：ssm-enable-publicblock
 作業アカウント：073659750679（dip-com-security）
 
+リージョン：ap-northeast-1
+
 サブスクリプション：https://global.sns-api.chatbot.amazonaws.com
 
 
