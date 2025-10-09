@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Id": "__default_policy_ID",
+  "Statement": [
+    {
+      "Sid": "__default_statement_ID",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "*"
+      },
+      "Action": [
+        "SNS:GetTopicAttributes",
+        "SNS:SetTopicAttributes",
+        "SNS:AddPermission",
+        "SNS:RemovePermission",
+        "SNS:DeleteTopic",
+        "SNS:Subscribe",
+        "SNS:ListSubscriptionsByTopic",
+        "SNS:Publish"
+      ],
+      "Resource": "arn:aws:sns:ap-northeast-1:073659750679:ssm-enable-publicblock",
+      "Condition": {
+        "StringEquals": {
+          "AWS:SourceOwner": "073659750679"
+        }
+      }
+    },
+    {
+      "Sid": "AWSEvents_ArticleEvent_Id",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:sts::786074732576:assumed-role/Lambda-EnableSSMDocPublicBlock-Role/EnableSSMDocPublicBlock"
+      },
+      "Action": "sns:Publish",
+      "Resource": "arn:aws:sns:ap-northeast-1:073659750679:ssm-enable-publicblock"
+    }
+  ]
+}
