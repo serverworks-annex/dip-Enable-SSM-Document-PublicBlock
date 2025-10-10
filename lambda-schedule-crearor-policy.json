@@ -21,7 +21,7 @@
             "Sid": "PassSchedulerInvokeRole",
             "Effect": "Allow",
             "Action": "iam:PassRole",
-            "Resource": "arn:aws:iam::AccountID:role/schedule-creator-role"
+            "Resource": "arn:aws:iam::786074732576:role/schedule-creator-role"
         }
     ]
 }
