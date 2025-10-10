@@ -76,7 +76,7 @@ IAMロール：Lambda-EnableSSMDocPublicBlock-Role
 
 Target：スケジュール作成用Lambda（create-schedule-lambda ）
 
-# SNS：ssm-enable-publicblock
+# SNS：ssm-enable-publicblock-topic
 作業アカウント：073659750679（dip-com-security）
 
 リージョン：ap-northeast-1
