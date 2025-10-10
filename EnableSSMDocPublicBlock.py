@@ -26,7 +26,7 @@ SKIP_IF_SSM_NOT_READY = os.getenv("SKIP_IF_SSM_NOT_READY", "true").lower() == "t
 SCHEDULER_REGION = os.getenv("SCHEDULER_REGION", "us-east-1")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
-TOPIC_ARN = os.getenv("SNS_TOPIC_ARN", "arn:aws:sns:ap-northeast-1:380311593622:test-ssm-enable-publicblock")
+TOPIC_ARN = os.getenv("SNS_TOPIC_ARN", "arn:aws:sns:ap-northeast-1:073659750679:ssm-enable-publicblock-topic")
 SNS_REGION = os.getenv("SNS_REGION", "ap-northeast-1")
 
 # SCP で拒否された場合に error ではなく skipped とするか
