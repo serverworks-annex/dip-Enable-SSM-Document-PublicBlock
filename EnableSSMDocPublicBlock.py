@@ -5,6 +5,7 @@ import random
 import logging
 import boto3
 from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.config import Config
 
 # ===== Logging =====
 logger = logging.getLogger()
@@ -31,6 +32,16 @@ SNS_REGION = os.getenv("SNS_REGION", "ap-northeast-1")
 
 # SCP で拒否された場合に error ではなく skipped とするか
 SKIP_ON_SCP_DENY = os.getenv("SKIP_ON_SCP_DENY", "true").lower() == "true"
+
+# 指数バックオフ
+def backoff_sleep(attempt: int, base: float = 0.5, cap: float = 8.0) -> None:
+    """
+    attempt: 0,1,2,... と増えるごとに待機上限が 2^n で伸びる
+    base   : 初期待機（秒）
+    cap    : 上限（秒）
+    """
+    delay = min(cap, base * (2 ** attempt))
+    time.sleep(random.uniform(0, delay))
 
 sts = boto3.client("sts")
 scheduler = boto3.client("scheduler", region_name=SCHEDULER_REGION)
@@ -153,7 +164,7 @@ def _is_scp_deny(code: str, msg: str) -> bool:
             "service control policy",
             "explicit deny",
             "scp",
-            "aws:requestedregion",  # リージョン制限でよく出るキー
+            "aws:requestedregion", 
         )
         return any(k in text for k in keys)
     return False
@@ -170,6 +181,14 @@ def handle_one_account(acct_id: str):
 
     regions = enumerate_regions(creds)
     results = {}
+    retry_counts = {}
+
+    throttle_codes = (
+        "Throttling", "ThrottlingException", "TooManyRequestsException",
+        "RequestLimitExceeded", "ProvisionedThroughputExceededException",
+    )
+    MAX_RETRIES = 6
+
     for region in regions:
         try:
             cli = ssm_cli(creds, region)
@@ -191,15 +210,33 @@ def handle_one_account(acct_id: str):
 
             logger.error({"msg": "client_error", "account": acct_id, "region": region, "code": code, "message": msg})
 
-            if code in ("ThrottlingException", "TooManyRequestsException"):
-                time.sleep(1 + random.random())
-                try:
-                    results[region] = ensure_disabled(cli, region)
-                    continue
-                except Exception as e2:
-                    logger.error({"msg": "retry_failed", "account": acct_id, "region": region, "error": str(e2)})
-                    results[region] = f"error:{type(e2).__name__}"
-                    continue
+            # 指数バックオフを用いたリトライ
+            if code in throttle_codes:
+                attempt = retry_counts.get(region, 0)
+
+                while attempt < MAX_RETRIES:
+                    backoff_sleep(attempt)  # Exponential Backoff + Full Jitter
+                    try:
+                        results[region] = ensure_disabled(cli, region)
+                        retry_counts[region] = 0
+                        break
+                    except ClientError as e2:
+                        attempt += 1
+                        retry_counts[region] = attempt
+                        code2 = e2.response.get("Error", {}).get("Code", "")
+                        msg2 = e2.response.get("Error", {}).get("Message", "")
+                        logger.error({
+                            "msg": "retry_failed",
+                            "account": acct_id, "region": region,
+                            "attempt": attempt, "code": code2, "message": msg2
+                        })
+                        if code2 not in throttle_codes:
+                            results[region] = f"error:{code2}:{msg2}"
+                            break
+                else:
+                    results[region] = f"error:{code}:{msg}"
+
+                continue
 
             results[region] = f"error:{code}:{msg}"
 
@@ -256,7 +293,7 @@ def result_notification(subject: str, message: str):
         return
     resp = sns_client.publish(
         TopicArn=TOPIC_ARN,
-        Subject=subject[:100],   # SNS Subject は最大 100 文字
+        Subject=subject[:100], 
         Message=message
     )
     logger.info({"msg": "sns_published", "message_id": resp.get("MessageId"), "topic": TOPIC_ARN})
